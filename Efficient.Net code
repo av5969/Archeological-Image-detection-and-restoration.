@@ -1,0 +1,204 @@
+import os
+import caer
+import numpy as np
+import cv2 as cv
+import tensorflow as tf
+import tkinter as tk
+import matplotlib.pyplot as plt
+from tensorflow.keras.utils import to_categorical
+from efficientnet.tfkeras import EfficientNetB0
+
+# Set image size and number of channels
+img_size = (224, 224)  # Change image size to match EfficientNet input size
+channels = 3  # Set channels to 3 for color (RGB) images
+
+# Path to your character dataset
+char_path = r'C:\Users\avshe\Desktop\Open CV\Faces\Train\Celebrity Faces Dataset'
+
+# Creating a character dictionary, sorting it in descending order
+char_dict = {}
+for char in os.listdir(char_path):
+    char_dict[char] = len(os.listdir(os.path.join(char_path, char)))
+
+# Sort in descending order
+char_dict = caer.sort_dict(char_dict, descending=True)
+
+# Getting the first 10 categories with the most number of images
+characters = []
+count = 0
+for i in char_dict:
+    characters.append(i[0])
+    count += 1
+    if count >= 16:
+        break
+
+# Create a list of image file paths and labels
+data = []
+for i, char in enumerate(characters):
+    char_dir = os.path.join(char_path, char)
+    image_files = os.listdir(char_dir)
+    for img_file in image_files:
+        img_path = os.path.join(char_dir, img_file)
+        data.append((img_path, i))
+
+# Shuffle the data
+np.random.shuffle(data)
+
+# Split the data into train and validation
+val_size = int(len(data) * 0.2)
+train_data = data[val_size:]
+val_data = data[:val_size]
+
+# Create custom data loading functions
+def load_and_preprocess_image(image_path, label):
+    img = cv.imread(image_path)
+    img = cv.cvtColor(img, cv.COLOR_BGR2RGB)
+    img = cv.resize(img, img_size)
+    img = img.astype('float32') / 255.0
+    return img, label
+
+# Load and preprocess the training data
+train_images = []
+train_labels = []
+for img_path, label in train_data:
+    img, label = load_and_preprocess_image(img_path, label)
+    train_images.append(img)
+    train_labels.append(label)
+
+train_images = np.array(train_images)
+train_labels = np.array(train_labels)
+
+# Load and preprocess the validation data
+val_images = []
+val_labels = []
+for img_path, label in val_data:
+    img, label = load_and_preprocess_image(img_path, label)
+    val_images.append(img)
+    val_labels.append(label)
+
+val_images = np.array(val_images)
+val_labels = np.array(val_labels)
+
+# Create the EfficientNet model
+def create_efficientnet_model(IMG_SIZE, channels, output_dim):
+    base_model = EfficientNetB0(weights='imagenet', include_top=False, input_shape=(IMG_SIZE[0], IMG_SIZE[1], channels))
+    x = base_model.output
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dense(256, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    predictions = tf.keras.layers.Dense(output_dim, activation='softmax')(x)
+
+    model = tf.keras.models.Model(inputs=base_model.input, outputs=predictions)
+    return model
+
+model = create_efficientnet_model(IMG_SIZE=img_size, channels=channels, output_dim=len(characters))
+optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+
+# Function to preprocess and recognize a character from a test image
+def recognize_character(test_path):
+    # Read the test image
+    img = cv.imread(test_path)
+
+    # Preprocess the image for testing
+    def prepare(img):
+        img = cv.cvtColor(img, cv.COLOR_BGR2RGB)  # Convert to RGB
+        img = cv.resize(img, img_size)
+        img = img.astype('float32') / 255.0  # Normalize pixel values
+        img_batch = np.expand_dims(img, axis=0)  # Add a batch dimension
+        return img_batch
+
+    predictions = model.predict(prepare(img))
+
+    # Getting class with the highest probability
+    predicted_character = characters[np.argmax(predictions[0])]
+
+    # Apply image processing techniques to the input image
+    processed_img = img.copy()
+
+    # Adaptive brightness and contrast adjustment using CLAHE
+    clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    for i in range(channels):
+        processed_img[:, :, i] = clahe.apply(processed_img[:, :, i])
+
+    # Adaptive sharpening
+    for i in range(channels):
+        blur_img = cv.GaussianBlur(processed_img[:, :, i], (0, 0), 3)
+        processed_img[:, :, i] = cv.addWeighted(processed_img[:, :, i], 1.5, blur_img, -0.5, 0)
+
+    # Applying adaptive thresholding
+    for i in range(channels):
+        processed_img[:, :, i] = cv.adaptiveThreshold(processed_img[:, :, i], 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2)
+
+    # Edge detection
+    edges = cv.Canny(processed_img[:, :, :3], 100, 200)
+
+    # Restore the original image
+    restored_image = img.copy()
+
+    return predicted_character, processed_img, restored_image, edges
+
+# Create a GUI window
+window = tk.Tk()
+window.title("Character Recognition")
+window.geometry("1200x800")
+
+# Add developer details
+developer_label = tk.Label(window, text="Developer: Aman Sheikh", font=("Helvetica", 14, "italic"), fg="gray")
+developer_label.pack()
+
+# Function to recognize a character and update the GUI
+def recognize_and_update():
+    # Get the path of the test image
+    test_path = test_image_entry.get()
+
+    # Recognize the character and get the processed image
+    predicted_character, processed_image, restored_image, edges = recognize_character(test_path)
+
+    # Update the predicted character label
+    predicted_character_label.config(text="Predicted Character: {}".format(predicted_character), font=("Helvetica", 18, "bold"))
+
+    # Display the original, processed, and restored images side by side
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    ax[0].imshow(cv.cvtColor(cv.imread(test_path), cv.COLOR_BGR2RGB))
+    ax[0].set_title('Input Image')
+    ax[0].axis('off')
+
+    ax[1].imshow(processed_image)
+    ax[1].set_title('Processed Image\nPredicted Character: {}'.format(predicted_character))
+    ax[1].axis('off')
+
+    ax[2].imshow(cv.cvtColor(restored_image, cv.COLOR_BGR2RGB))
+    ax[2].set_title('Restored Image')
+    ax[2].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+# Label for test image input
+test_image_label = tk.Label(window, text="Enter Test Image Path:", font=("Helvetica", 16))
+test_image_label.pack()
+
+# Entry field for test image path
+test_image_entry = tk.Entry(window, width=70, font=("Helvetica", 14))
+test_image_entry.pack()
+
+# Button to recognize the character
+recognize_button = tk.Button(window, text="Recognize Character", command=recognize_and_update, font=("Helvetica", 14, "bold"), bg="lightblue", padx=15, pady=5)
+recognize_button.pack()
+
+# Label to display the predicted character
+predicted_character_label = tk.Label(window, text="Predicted Character: ", font=("Helvetica", 18, "bold"), fg="green")
+predicted_character_label.pack()
+
+# Function to quit the application
+def quit_application():
+    window.quit()
+    window.destroy()
+
+# Button to quit the application
+quit_button = tk.Button(window, text="Quit", command=quit_application, font=("Helvetica", 14, "bold"), bg="red", padx=15, pady=5)
+quit_button.pack()
+
+# Run the GUI application
+window.mainloop()

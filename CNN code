@@ -1,0 +1,246 @@
+import os
+import caer
+import canaro
+import numpy as np
+import cv2 as cv
+import gc
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import tkinter as tk
+from PIL import ImageTk, Image, ImageDraw, ImageFont
+from tensorflow.keras.utils import to_categorical
+
+# Set image size and number of channels
+img_size = (80, 80)
+channels = 1
+
+# Path to your character dataset
+char_path = r'C:\Users\avshe\Desktop\Open CV\Faces\Train\Celebrity Faces Dataset'
+
+# Creating a character dictionary, sorting it in descending order
+char_dict = {}
+for char in os.listdir(char_path):
+    char_dict[char] = len(os.listdir(os.path.join(char_path, char)))
+
+# Sort in descending order
+char_dict = caer.sort_dict(char_dict, descending=True)
+
+# Getting the first 10 categories with the most number of images
+characters = []
+count = 0
+for i in char_dict:
+    characters.append(i[0])
+    count += 1
+    if count >= 16:
+        break
+
+# Create the training data
+train = caer.preprocess_from_dir(char_path, characters, channels=channels, IMG_SIZE=img_size, isShuffle=True)
+
+# Separating the array and corresponding labels
+featureSet, labels = caer.sep_train(train, IMG_SIZE=img_size)
+
+# Normalize the featureSet
+featureSet = caer.normalize(featureSet)
+
+# Converting numerical labels to binary class vectors
+labels = to_categorical(labels, len(characters))
+
+# Creating train and validation data
+x_train, x_val, y_train, y_val = caer.train_val_split(featureSet, labels, val_ratio=.2)
+
+# Deleting variables to save memory
+del train
+del featureSet
+del labels
+gc.collect()
+
+# Useful variables when training
+BATCH_SIZE = 32
+EPOCHS = 50  # Decreased the number of EPOCHS for faster training
+momentum = 0.9
+nesterov = True
+
+# Image data generator (introduces randomness in the network)
+datagen = canaro.generators.imageDataGenerator()
+train_gen = datagen.flow(x_train, y_train, batch_size=BATCH_SIZE)
+
+# Learning rate scheduler
+learning_rate = 0.01
+decay_steps = 1000
+lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+    initial_learning_rate=learning_rate,
+    decay_steps=decay_steps,
+    decay_rate=0.5)
+optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=momentum, nesterov=nesterov)
+img_size = 80
+
+# Create the model
+model = canaro.models.createDefaultModel(IMG_SIZE=img_size, channels=channels, output_dim=len(characters))
+model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+
+# Function to preprocess and recognize a character from a test image
+def recognize_character(test_path):
+    # Read the test image
+    img = cv.imread(test_path)
+
+    # Preprocess the image for testing
+    def prepare(img):
+        img = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+        img = cv.resize(img, (80, 80))
+        img = np.expand_dims(img, axis=-1)  # Add a channel dimension
+        img = img.astype('float32') / 255.0  # Normalize pixel values
+        img_batch = np.expand_dims(img, axis=0)  # Add a batch dimension
+        return img_batch
+
+    predictions = model.predict(prepare(img))
+
+    # Getting class with the highest probability
+    predicted_character = characters[np.argmax(predictions[0])]
+
+    # Apply image processing techniques to the input image
+    processed_img = img.copy()
+
+    # Convert image to grayscale
+    gray_img = cv.cvtColor(processed_img, cv.COLOR_BGR2GRAY)
+
+    # Adaptive brightness and contrast adjustment using CLAHE
+    clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    processed_img = clahe.apply(gray_img)
+
+    # Adaptive sharpening
+    blur_img = cv.GaussianBlur(processed_img, (0, 0), 3)
+    processed_img = cv.addWeighted(processed_img, 1.5, blur_img, -0.5, 0)
+
+    # Applying adaptive thresholding
+    processed_img = cv.adaptiveThreshold(processed_img, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2)
+
+    # Convert processed image to 3-channel BGR color space
+    processed_img = cv.cvtColor(processed_img, cv.COLOR_GRAY2BGR)
+
+    # Edge detection
+    edges = cv.Canny(processed_img, 100, 200)
+
+    # Overlay the processed image and edge-detected image on top of the original image
+    processed_img = cv.addWeighted(img, 0.5, processed_img, 0.5, 0)
+    edges = cv.cvtColor(edges, cv.COLOR_GRAY2BGR)
+
+    # Display the restored image in color
+    restored_color_img = cv.cvtColor(cv.imread(test_path), cv.COLOR_BGR2RGB)
+
+    return predicted_character, processed_img, restored_color_img, edges, gray_img
+
+# Create a GUI window
+window = tk.Tk()
+window.title("Character Recognition")
+window.geometry("1200x800")
+
+# Add developer details
+developer_label = tk.Label(window, text="Developer: Aman Sheikh", font=("Helvetica", 14, "italic"), fg="gray")
+developer_label.pack()
+
+# Function to recognize a character and update the GUI
+def recognize_and_update():
+    # Get the path of the test image
+    test_path = test_image_entry.get()
+
+    # Recognize the character and get the processed image
+    predicted_character, processed_image, restored_color_img, edges, gray_image = recognize_character(test_path)
+
+    # Update the predicted character label
+    predicted_character_label.config(text="Predicted Character: {}".format(predicted_character), font=("Helvetica", 18, "bold"))
+
+    # Display the original and processed images
+    fig, ax = plt.subplots(2, 3, figsize=(12, 8))
+    ax[0, 0].imshow(restored_color_img)
+    ax[0, 0].set_title('Input Image')
+    ax[0, 0].axis('off')
+    ax[0, 1].imshow(cv.cvtColor(processed_image[:, :, :3], cv.COLOR_BGR2RGB))
+    ax[0, 1].set_title('Processed Image\nPredicted Character: {}'.format(predicted_character))
+    ax[0, 1].axis('off')
+    ax[0, 2].imshow(cv.cvtColor(edges, cv.COLOR_BGR2RGB))
+    ax[0, 2].set_title('Edge-Detected Image')
+    ax[0, 2].axis('off')
+
+    # Display the grayscale image
+    ax[1, 0].imshow(gray_image, cmap='gray')
+    ax[1, 0].set_title('restored image')
+    ax[1, 0].axis('off')
+
+    # Calculate and display the histogram
+    hist, bins = np.histogram(gray_image.ravel(), bins=256, range=[0, 256])
+    ax[1, 1].hist(gray_image.ravel(), bins=256, color='gray', histtype='step')
+    ax[1, 1].set_title('Histogram')
+    ax[1, 1].axis('off')
+
+    # Calculate and display accuracy
+    test_img = cv.imread(test_path)
+    test_img_gray = cv.cvtColor(test_img, cv.COLOR_BGR2GRAY)
+    test_img_gray = cv.resize(test_img_gray, (80, 80))
+    test_img_gray = test_img_gray.astype('float32') / 255.0
+    test_img_gray = np.expand_dims(test_img_gray, axis=0)
+    accuracy = model.evaluate(test_img_gray, to_categorical([characters.index(predicted_character)], len(characters)))
+    accuracy_label.config(text="Accuracy: {:.2f}%".format(accuracy[1] * 100), font=("Helvetica", 18, "bold"))
+
+    # Calculate character recognition statistics
+    char_count = [0] * len(characters)
+    for i, char in enumerate(characters):
+        char_count[i] = len(os.listdir(os.path.join(char_path, char)))
+
+    # Create a pie chart for character recognition statistics
+    plt.figure(figsize=(6, 6))
+    plt.subplot(121)
+    plt.pie(char_count, labels=characters, autopct='%1.1f%%', startangle=90)
+    plt.title('Character Recognition Statistics (Pie Chart)')
+
+    # Create a bar graph for character recognition statistics
+    plt.subplot(122)
+    plt.bar(characters, char_count, color='skyblue')
+    plt.xlabel('Characters')
+    plt.ylabel('Recognition')
+    plt.title('Character Recognition Statistics (Bar Graph)')
+
+    plt.tight_layout()
+    plt.show()
+
+# Label for test image input
+test_image_label = tk.Label(window, text="Enter Test Image Path:", font=("Helvetica", 16))
+test_image_label.pack()
+
+# Entry field for test image path
+test_image_entry = tk.Entry(window, width=70, font=("Helvetica", 14))
+test_image_entry.pack()
+
+# Button to recognize the character
+recognize_button = tk.Button(window, text="Recognize Character", command=recognize_and_update, font=("Helvetica", 14, "bold"), bg="lightblue", padx=15, pady=5)
+recognize_button.pack()
+
+# Label to display the predicted character
+predicted_character_label = tk.Label(window, text="Predicted Character: ", font=("Helvetica", 18, "bold"), fg="green")
+predicted_character_label.pack()
+
+# Label to display the accuracy
+accuracy_label = tk.Label(window, text="Accuracy: ", font=("Helvetica", 18, "bold"), fg="blue")
+accuracy_label.pack()
+
+# Function to quit the application
+def quit_application():
+    window.quit()
+    window.destroy()
+
+# Button to quit the application
+quit_button = tk.Button(window, text="Quit", command=quit_application, font=("Helvetica", 14, "bold"), bg="red", padx=15, pady=5)
+quit_button.pack()
+
+# Load background image for the output window
+output_bg_image = Image.open(r'C:\Users\avshe\Downloads\bgr.jpg')
+output_bg_image = output_bg_image.resize((window.winfo_screenwidth(), window.winfo_screenheight()), Image.ANTIALIAS)
+output_bg_image = ImageTk.PhotoImage(output_bg_image)
+
+# Create a canvas for the background image in the output window
+output_canvas = tk.Canvas(window, width=window.winfo_screenwidth(), height=window.winfo_screenheight())
+output_canvas.pack()
+output_canvas.create_image(0, 0, anchor=tk.NW, image=output_bg_image)
+
+# Run the GUI application
+window.mainloop()
